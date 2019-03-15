@@ -14,7 +14,6 @@ import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.xpack.sql.SqlIllegalArgumentException;
 import org.elasticsearch.xpack.sql.type.DataType;
 import org.elasticsearch.xpack.sql.util.DateUtils;
-import org.joda.time.DateTime;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
@@ -87,7 +86,7 @@ public class FieldHitExtractor implements HitExtractor {
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeString(fieldName);
-        out.writeOptionalString(dataType == null ? null : dataType.esType);
+        out.writeOptionalString(dataType == null ? null : dataType.typeName);
         out.writeBoolean(useDocValue);
         out.writeOptionalString(hitName);
     }
@@ -132,10 +131,6 @@ public class FieldHitExtractor implements HitExtractor {
             if (values instanceof String) {
                 return DateUtils.asDateTime(Long.parseLong(values.toString()));
             }
-            // returned by nested types...
-            if (values instanceof DateTime) {
-                return DateUtils.asDateTime((DateTime) values);
-            }
         }
         if (values instanceof Long || values instanceof Double || values instanceof String || values instanceof Boolean) {
             return values;
@@ -143,13 +138,12 @@ public class FieldHitExtractor implements HitExtractor {
         throw new SqlIllegalArgumentException("Type {} (returned by [{}]) is not supported", values.getClass().getSimpleName(), fieldName);
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({ "unchecked", "rawtypes" })
     Object extractFromSource(Map<String, Object> map) {
         Object value = null;
 
         // Used to avoid recursive method calls
-        // Holds the sub-maps in the document hierarchy that are pending to be inspected.
-        // along with the current index of the `path`.
+        // Holds the sub-maps in the document hierarchy that are pending to be inspected along with the current index of the `path`.
         Deque<Tuple<Integer, Map<String, Object>>> queue = new ArrayDeque<>();
         queue.add(new Tuple<>(-1, map));
 
@@ -165,6 +159,19 @@ public class FieldHitExtractor implements HitExtractor {
             for (int i = idx + 1; i < path.length; i++) {
                 sj.add(path[i]);
                 Object node = subMap.get(sj.toString());
+                
+                if (node instanceof List) {
+                    List listOfValues = (List) node;
+                    if (listOfValues.size() == 1) {
+                        // this is a List with a size of 1 e.g.: {"a" : [{"b" : "value"}]} meaning the JSON is a list with one element
+                        // or a list of values with one element e.g.: {"a": {"b" : ["value"]}}
+                        node = listOfValues.get(0);
+                    } else {
+                        // a List of elements with more than one value. Break early and let unwrapMultiValue deal with the list
+                        return unwrapMultiValue(node);
+                    }
+                }
+                
                 if (node instanceof Map) {
                     if (i < path.length - 1) {
                         // Add the sub-map to the queue along with the current path index
